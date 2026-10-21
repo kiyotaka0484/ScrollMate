@@ -1,8 +1,8 @@
-import tkinter as tk
 import ctypes
+import sys
 from ctypes import wintypes
 
-user32 = ctypes.windll.user32
+tk = None
 
 WM_MOUSEWHEEL = 0x020A
 WHEEL_DELTA = 120
@@ -11,9 +11,35 @@ NOTCHES = 1  # slow speed
 class POINT(ctypes.Structure):
     _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
 
+def load_user32():
+    if sys.platform != "win32":
+        raise OSError("ScrollMate requires Windows.")
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
+    user32.GetCursorPos.restype = wintypes.BOOL
+    user32.WindowFromPoint.argtypes = [POINT]
+    user32.WindowFromPoint.restype = wintypes.HWND
+    user32.GetParent.argtypes = [wintypes.HWND]
+    user32.GetParent.restype = wintypes.HWND
+    user32.IsWindow.argtypes = [wintypes.HWND]
+    user32.IsWindow.restype = wintypes.BOOL
+    user32.PostMessageW.argtypes = [
+        wintypes.HWND,
+        wintypes.UINT,
+        wintypes.WPARAM,
+        wintypes.LPARAM,
+    ]
+    user32.PostMessageW.restype = wintypes.BOOL
+    return user32
+
 class ScrollMate:
     def __init__(self, root):
+        if tk is None:
+            raise RuntimeError("Tkinter is required to run ScrollMate.")
+
         self.root = root
+        self.user32 = load_user32()
         self.target_x = None
         self.target_y = None
         self.target_hwnd = None
@@ -104,7 +130,7 @@ class ScrollMate:
         for _ in range(10):
             if current == self.own_hwnd:
                 return True
-            parent = user32.GetParent(current)
+            parent = self.user32.GetParent(current)
             if not parent or parent == current:
                 break
             current = parent
@@ -112,8 +138,11 @@ class ScrollMate:
 
     def remember_mouse(self):
         p = POINT()
-        user32.GetCursorPos(ctypes.byref(p))
-        hwnd = user32.WindowFromPoint(p)
+        if not self.user32.GetCursorPos(ctypes.byref(p)):
+            self.root.after(20, self.remember_mouse)
+            return
+
+        hwnd = self.user32.WindowFromPoint(p)
 
         if hwnd and not self.is_our_window(hwnd):
             self.target_x = p.x
@@ -131,32 +160,51 @@ class ScrollMate:
 
         # Re-identify the window at the saved page position.
         p = POINT(x, y)
-        hwnd = user32.WindowFromPoint(p)
+        hwnd = self.user32.WindowFromPoint(p)
 
         if hwnd and not self.is_our_window(hwnd):
             target = hwnd
         else:
             target = self.target_hwnd
 
+        if not target or not self.user32.IsWindow(target):
+            return
+
         amount = direction * WHEEL_DELTA * NOTCHES
 
         # Same WM_MOUSEWHEEL construction as the known-working V4.
-        wparam = (amount & 0xFFFF) << 16
+        wparam = ((ctypes.c_short(amount).value & 0xFFFF) << 16)
         lparam = ((y & 0xFFFF) << 16) | (x & 0xFFFF)
 
-        user32.PostMessageW(target, WM_MOUSEWHEEL, wparam, lparam)
+        self.user32.PostMessageW(target, WM_MOUSEWHEEL, wparam, lparam)
 
         # Browser windows can have nested parent windows.
-        parent = user32.GetParent(target)
+        parent = self.user32.GetParent(target)
         for _ in range(5):
             if not parent:
                 break
-            user32.PostMessageW(parent, WM_MOUSEWHEEL, wparam, lparam)
-            next_parent = user32.GetParent(parent)
+            self.user32.PostMessageW(parent, WM_MOUSEWHEEL, wparam, lparam)
+            next_parent = self.user32.GetParent(parent)
             if next_parent == parent:
                 break
             parent = next_parent
 
-root = tk.Tk()
-ScrollMate(root)
-root.mainloop()
+def main():
+    global tk
+
+    try:
+        import tkinter as tk_module
+    except ModuleNotFoundError as exc:
+        raise SystemExit("Tkinter is not available in this Python environment.") from exc
+
+    tk = tk_module
+
+    if sys.platform != "win32":
+        raise SystemExit("ScrollMate runs on Windows only.")
+
+    root = tk.Tk()
+    ScrollMate(root)
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
